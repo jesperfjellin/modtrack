@@ -3,7 +3,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import schedule
 from .aws_utils import SecretsManager, EventBridge
 from .config import Config
@@ -16,10 +16,6 @@ class ModelResultsHandler(FileSystemEventHandler):
         # Initialize logger first
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
-        
-        # Add handler if you want console output
-        console_handler = logging.StreamHandler()
-        self.logger.addHandler(console_handler)
         
         self.target_directory = target_directory
         self.processed_files = set()
@@ -76,12 +72,8 @@ class ModelResultsHandler(FileSystemEventHandler):
         1. Extract data from the model results
         2. Store it in the database
         """
-
-        self.logger.info(f"Processing file: {file_path}")
-        self.logger.info(f"File exists: {os.path.exists(file_path)}")
-        self.logger.info(f"File size: {os.path.getsize(file_path)} bytes")
         # TODO: Implement file processing logic
-        self.logger.info(f"Processing file: {file_path}")
+        pass
 
     def schedule_validations(self, predictions):
         """Schedule validation checks using EventBridge"""
@@ -136,6 +128,36 @@ class ModelResultsHandler(FileSystemEventHandler):
         
         return APIClient(api_secrets['api_url'], api_secrets['api_key'])
 
+class ScanScheduler:
+    def __init__(self, directory: Path, handler: ModelResultsHandler, interval_minutes: int = 1):
+        self.directory = directory
+        self.handler = handler
+        self.interval = interval_minutes
+        self.job = schedule.every(self.interval).minutes.do(self.scan_and_log)
+        
+        # Calculate the initial next_run_time
+        self.next_run_time = datetime.now(timezone.utc) + timedelta(minutes=self.interval)
+        self.log_next_run(initial=True)
+
+    def scan_and_log(self):
+        """Perform the scan and log the next scheduled run."""
+        try:
+            scan_directory(self.directory, self.handler)
+        except Exception as e:
+            self.handler.logger.error(f"Error during scan: {e}")
+        
+        # Calculate the next run time manually
+        self.next_run_time = datetime.now(timezone.utc) + timedelta(minutes=self.interval)
+        self.log_next_run()
+
+    def log_next_run(self, initial=False):
+        """Log the next scheduled scan time."""
+        run_time_str = self.next_run_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+        if initial:
+            self.handler.logger.info(f"Scheduled first scan: {run_time_str}")
+        else:
+            self.handler.logger.info(f"Scheduled next scan: {run_time_str}")
+
 def scan_directory(directory: Path, handler: ModelResultsHandler):
     """Scan the directory for any files that haven't been processed yet"""
     handler.logger.info("Scanning...")
@@ -155,26 +177,22 @@ def start_monitoring(directory_path: str):
     observer.schedule(handler, str(target_dir), recursive=False)
     observer.start()
 
-    # Run first scan immediately
-    scan_directory(target_dir, handler)
-    
-    # Schedule regular scans every minute
-    job = schedule.every(1).minutes.do(scan_directory, target_dir, handler)
-    handler.logger.info(f"Scheduled next scan: {job.next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-
     try:
-        while True:
-            n = schedule.idle_seconds()
-            if n is None:
-                break
-            elif n > 0:
-                time.sleep(n)
-            
-            schedule.run_pending()
-            next_job = schedule.next_run()
-            if next_job:
-                handler.logger.info(f"Scheduled next scan: {next_job.strftime('%Y-%m-%d %H:%M:%S')}")
-    except KeyboardInterrupt:
-        observer.stop()
-        observer.join()
+        # Run first scan immediately
+        scan_directory(target_dir, handler)
+        handler.logger.info("Initial scan completed.")
 
+        # Initialize the scheduler
+        scheduler = ScanScheduler(target_dir, handler, interval_minutes=1)
+
+        # Main loop to run scheduled jobs
+        while True:
+            schedule.run_pending()
+            time.sleep(1)  # Sleep to prevent high CPU usage
+    except KeyboardInterrupt:
+        handler.logger.info("Stopping monitoring due to keyboard interrupt.")
+        observer.stop()
+    except Exception as e:
+        handler.logger.error(f"An error occurred: {e}")
+        observer.stop()
+    observer.join()
