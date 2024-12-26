@@ -9,6 +9,7 @@ from .aws_utils import SecretsManager, EventBridge
 from .config import Config
 import psycopg2
 from typing import Optional
+import os
 
 class ModelResultsHandler(FileSystemEventHandler):
     def __init__(self, target_directory: Path):
@@ -75,6 +76,10 @@ class ModelResultsHandler(FileSystemEventHandler):
         1. Extract data from the model results
         2. Store it in the database
         """
+
+        self.logger.info(f"Processing file: {file_path}")
+        self.logger.info(f"File exists: {os.path.exists(file_path)}")
+        self.logger.info(f"File size: {os.path.getsize(file_path)} bytes")
         # TODO: Implement file processing logic
         self.logger.info(f"Processing file: {file_path}")
 
@@ -133,8 +138,10 @@ class ModelResultsHandler(FileSystemEventHandler):
 
 def scan_directory(directory: Path, handler: ModelResultsHandler):
     """Scan the directory for any files that haven't been processed yet"""
-    for file_path in directory.glob('*'):  # Adjust pattern based on your file types
+    handler.logger.info("Scanning...")
+    for file_path in directory.glob('*'):
         if file_path.is_file() and file_path not in handler.processed_files:
+            handler.logger.info(f"New file found: {file_path.name}")
             handler.process_file(file_path)
             handler.processed_files.add(file_path)
 
@@ -148,13 +155,25 @@ def start_monitoring(directory_path: str):
     observer.schedule(handler, str(target_dir), recursive=False)
     observer.start()
 
-    # Schedule regular scans every 5 minutes
-    schedule.every(5).minutes.do(scan_directory, target_dir, handler)
+    # Run first scan immediately
+    scan_directory(target_dir, handler)
+    
+    # Schedule regular scans every minute
+    job = schedule.every(1).minutes.do(scan_directory, target_dir, handler)
+    handler.logger.info(f"Scheduled next scan: {job.next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
     try:
         while True:
+            n = schedule.idle_seconds()
+            if n is None:
+                break
+            elif n > 0:
+                time.sleep(n)
+            
             schedule.run_pending()
-            time.sleep(1)
+            next_job = schedule.next_run()
+            if next_job:
+                handler.logger.info(f"Scheduled next scan: {next_job.strftime('%Y-%m-%d %H:%M:%S')}")
     except KeyboardInterrupt:
         observer.stop()
         observer.join()
