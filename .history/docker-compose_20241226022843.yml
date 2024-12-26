@@ -1,0 +1,32 @@
+services:
+  localstack:
+    image: localstack/localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=secretsmanager,events
+      - DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  postgres:
+    image: postgis/postgis
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: modtrack
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    environment:
+      - ENVIRONMENT=local
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./:/app
+    depends_on:
+      - localstack
+      - postgres
