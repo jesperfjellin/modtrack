@@ -1,6 +1,8 @@
 services:
   localstack:
     image: localstack/localstack
+    networks:
+      - app-network
     ports:
       - "4566:4566"
     environment:
@@ -10,6 +12,8 @@ services:
 
   postgres:
     image: postgres:latest
+    networks:
+      - app-network
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -24,12 +28,30 @@ services:
     depends_on:
       - localstack
       - postgres
+      - mock-api
+    networks:
+      - app-network
+    ports:
+      - "8080:8000"
     volumes:
       - ./volume/model_results:/data/model_results
     environment:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
+
+  mock-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-api
+    networks:
+      - app-network
+    ports:
+      - "8000:8000"
+
+networks:
+  app-network:
+    driver: bridge
 
 volumes:
   postgres_data:

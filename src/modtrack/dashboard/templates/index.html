@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ModTrack Dashboard</title>
+    <link href="/dashboard/static/styles.css" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>ModTrack Dashboard</h1>
+            <p class="timestamp">Last updated: {{ current_time.strftime('%Y-%m-%d %H:%M:%S UTC') }}</p>
+        </header>
+
+        <!-- Statistics Summary -->
+        <div class="stats-container">
+            <div class="stat-box">
+                <h3>Last 24 Hours</h3>
+                <div class="stat-grid">
+                    <div class="stat-item">
+                        <span class="stat-label">Total Predictions</span>
+                        <span class="stat-value">{{ stats.total_predictions }}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Success Rate</span>
+                        <span class="stat-value">{{ stats.success_rate }}%</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Avg Difference</span>
+                        <span class="stat-value">{{ stats.avg_difference }}m</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Max Difference</span>
+                        <span class="stat-value">{{ stats.max_difference }}m</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <h3>Prediction Accuracy Over Time</h3>
+            <canvas id="accuracyChart"></canvas>
+        </div>
+
+        <!-- Reservoir Statistics -->
+        <div class="reservoir-stats">
+            <h3>Reservoir Performance</h3>
+            <div class="reservoir-grid">
+                {% for stat in reservoir_stats %}
+                <div class="reservoir-card">
+                    <h4>{{ stat.reservoir_id }}</h4>
+                    <p>Predictions: {{ stat.prediction_count }}</p>
+                    <p>Avg Difference: {{ stat.avg_difference }}m</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Predictions Table -->
+        <div class="table-container">
+            <h2>Recent Predictions</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Reservoir</th>
+                        <th>Predicted Level</th>
+                        <th>Actual Level</th>
+                        <th>Difference</th>
+                        <th>Prediction Time</th>
+                        <th>Validation Time</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in records %}
+                    <tr>
+                        <td>{{ record.reservoir_id }}</td>
+                        <td>{{ "%.2f"|format(record.predicted_level) }}m</td>
+                        <td>
+                            {% if record.actual_level %}
+                                {{ "%.2f"|format(record.actual_level) }}m
+                            {% else %}
+                                Pending
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if record.difference %}
+                                {{ "%.2f"|format(record.difference) }}m
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ record.prediction_timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        <td>
+                            {% if record.validated_at %}
+                                {{ record.validated_at.strftime('%Y-%m-%d %H:%M:%S') }}
+                            {% else %}
+                                Expected: {{ record.validation_time.strftime('%Y-%m-%d %H:%M:%S') }}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if record.actual_level %}
+                                {% if record.difference < 5 %}
+                                    <span class="status good">Good</span>
+                                {% elif record.difference < 10 %}
+                                    <span class="status warning">Warning</span>
+                                {% else %}
+                                    <span class="status error">Poor</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="status pending">Pending</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Error template -->
+    {% if error_message %}
+    <div class="error-container">
+        <div class="error-message">
+            {{ error_message }}
+        </div>
+    </div>
+    {% endif %}
+    <!-- Add this at the end of the body, before closing body tag -->
+<script>
+    document.addEventListener('DOMContentLoaded', async function() {
+        // Fetch the accuracy data
+        const response = await fetch('/dashboard/api/accuracy-data');
+        const data = await response.json();
+    
+        // Create the chart
+        const ctx = document.getElementById('accuracyChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: data.timestamps.map(t => new Date(t).toLocaleTimeString()),
+                datasets: [{
+                    label: 'Prediction Deviation',
+                    data: data.deviations,
+                    borderColor: '#3498db',
+                    backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }, {
+                    label: 'Perfect Prediction (0)',
+                    data: new Array(data.timestamps.length).fill(0),
+                    borderColor: '#27ae60',
+                    borderWidth: 1,
+                    borderDash: [5, 5],
+                    fill: false
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Prediction Accuracy (Deviation from Actual Values)'
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                    }
+                },
+                scales: {
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Deviation (meters)'
+                        },
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.1)'
+                        }
+                    },
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time'
+                        },
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.1)'
+                        }
+                    }
+                }
+            }
+        });
+    });
+    </script>
+</body>
+</html>

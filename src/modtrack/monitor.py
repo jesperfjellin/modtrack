@@ -5,13 +5,20 @@ from watchdog.events import FileSystemEventHandler
 import logging
 from datetime import datetime, timezone, timedelta
 import schedule
+import csv
 from .aws_utils import SecretsManager, EventBridge
 from .config import Config
+from .db import init_db_schema
 import psycopg2
 from typing import Optional
 import os
+import json
+import httpx
+import uuid
 
 class ModelResultsHandler(FileSystemEventHandler):
+    PROCESSED_FILES_CSV = 'processed_files.csv'
+    
     def __init__(self, target_directory: Path):
         # Initialize logger first
         self.logger = logging.getLogger(__name__)
@@ -20,6 +27,9 @@ class ModelResultsHandler(FileSystemEventHandler):
         self.target_directory = target_directory
         self.processed_files = set()
         
+        # Path to the .csv file
+        self.processed_files_path = self.target_directory / self.PROCESSED_FILES_CSV
+        
         # Initialize with retries
         self.db_connection = None
         self.api_client = None
@@ -27,6 +37,12 @@ class ModelResultsHandler(FileSystemEventHandler):
         
         # Try to initialize connections with retries
         self._initialize_with_retries()
+        
+        # Load processed files from the CSV
+        self._load_processed_files()
+
+        # Initialize database schema
+        init_db_schema(self.db_connection)
 
     def _initialize_with_retries(self, max_retries=5, delay=2):
         """Initialize connections with retries"""
@@ -55,25 +71,138 @@ class ModelResultsHandler(FileSystemEventHandler):
                     self.logger.error("Failed to initialize after all retries")
                     raise
 
+    def _load_processed_files(self):
+        """Load processed files from the CSV into the in-memory set."""
+        if not self.processed_files_path.exists():
+            # If the CSV doesn't exist, create it
+            self.processed_files_path.touch()
+            self.logger.info(f"Created new processed files tracking CSV at {self.processed_files_path}")
+            return
+        
+        try:
+            with self.processed_files_path.open(mode='r', newline='') as csvfile:
+                reader = csv.reader(csvfile)
+                self.processed_files = {row[0] for row in reader if row}
+            self.logger.info(f"Loaded {len(self.processed_files)} processed files from CSV.")
+        except Exception as e:
+            self.logger.error(f"Failed to load processed files from CSV: {e}")
+            raise
+
+    def mark_file_as_processed(self, file_name: str):
+        """Append the processed file to the CSV and update the in-memory set."""
+        try:
+            with self.processed_files_path.open(mode='a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([file_name])
+            self.processed_files.add(file_name)
+            self.logger.debug(f"Marked file as processed in CSV: {file_name}")
+        except Exception as e:
+            self.logger.error(f"Failed to mark file as processed in CSV: {e}")
+            raise
+
     def on_created(self, event):
         if event.is_directory:
             return
         
         file_path = Path(event.src_path)
-        if file_path not in self.processed_files:
-            self.logger.info(f"New file detected: {file_path}")
-            self.process_file(file_path)
-            self.processed_files.add(file_path)
+        file_name = file_path.name
+        if file_name not in self.processed_files:
+            self.logger.info(f"New file detected: {file_name}")
+            try:
+                self.process_file(file_path)
+                self.mark_file_as_processed(file_name)
+            except Exception as e:
+                self.logger.error(f"Error processing file {file_name}: {e}")
 
-    def process_file(self, file_path: Path):
-        """
-        Process the newly detected file.
-        This is where you'll add the logic to:
-        1. Extract data from the model results
-        2. Store it in the database
-        """
-        # TODO: Implement file processing logic
-        pass
+    def process_file(self, file_path: Path) -> None:
+        self.logger.info(f"New file found: {file_path.name}")
+
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+
+            # Process each prediction
+            for prediction in data["predictions"]:
+                prediction_id = str(uuid.uuid4())  # Convert UUID to string
+                reservoir_id = prediction["reservoir_id"]
+                predicted_level = prediction["predicted_level"]
+                prediction_timestamp = datetime.fromisoformat(data["timestamp"].replace('Z', '+00:00'))
+                validation_time = datetime.fromisoformat(prediction["validation_time"].replace('Z', '+00:00'))
+
+                # Store prediction in database
+                with self.db_connection.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO predictions
+                        (id, reservoir_id, predicted_level, prediction_timestamp,
+                        validation_time, file_name)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (
+                        prediction_id,  # Now a string
+                        reservoir_id,
+                        predicted_level,
+                        prediction_timestamp,
+                        validation_time,
+                        file_path.name
+                    ))
+                    self.db_connection.commit()
+
+                # Schedule the validation check
+                schedule.every().day.at(validation_time.strftime("%H:%M")).do(
+                    self.validate_prediction,
+                    prediction_id=prediction_id,
+                    reservoir_id=reservoir_id,
+                    predicted_level=predicted_level
+                )
+                self.logger.info(f"Scheduled validation for reservoir {reservoir_id} at {validation_time}")
+
+            self.logger.info(f"Successfully processed file: {file_path.name}")
+
+        except Exception as e:
+            self.logger.error(f"Error processing file {file_path}: {str(e)}")
+            return
+    
+    def validate_prediction(self, prediction_id: str, reservoir_id: str, predicted_level: float) -> None:
+        try:
+            self.logger.info(f"Attempting to validate prediction {prediction_id} for reservoir {reservoir_id}")
+            self.logger.info(f"Using API URL: {self.api_secrets['api_url']}")
+            
+            # Get actual water level from API
+            response = self.api_client.get_water_level(reservoir_id)
+            actual_level = response["water_level"]
+
+            self.logger.info(f"Received response from API: {response}")
+            # Get actual water level from API
+            response = self.api_client.get_water_level(reservoir_id)
+            actual_level = response["water_level"]
+
+            # Calculate difference
+            difference = abs(actual_level - predicted_level)
+
+            # Store validation result
+            with self.db_connection.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO validations
+                    (id, prediction_id, actual_level, difference, validated_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    str(uuid.uuid4()),  # Convert UUID to string
+                    prediction_id,      # Already a string from process_file
+                    actual_level,
+                    difference,
+                    datetime.now(timezone.utc)
+                ))
+                self.db_connection.commit()
+
+            self.logger.info(
+                f"Validation for {reservoir_id}:\n"
+                f"  Predicted: {predicted_level:.2f}m\n"
+                f"  Actual: {actual_level:.2f}m\n"
+                f"  Difference: {difference:.2f}m"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error validating prediction for {reservoir_id}: {str(e)}")
+            self.logger.error(f"Full error details: ", exc_info=True)
 
     def schedule_validations(self, predictions):
         """Schedule validation checks using EventBridge"""
@@ -87,6 +216,8 @@ class ModelResultsHandler(FileSystemEventHandler):
             )
             
             self.logger.info(f"Scheduled validation for prediction {pred['id']} at {iso_timestamp}")
+    
+    
 
     def init_db_connection(self, secrets_dict=None):
         """Initialize database connection."""
@@ -116,17 +247,38 @@ class ModelResultsHandler(FileSystemEventHandler):
 
     def init_api_client(self, api_secrets):
         """Initialize API client using secrets"""
-        # TODO: Implement proper API client
-        class APIClient:
-            def __init__(self, url, api_key):
-                self.url = url
-                self.headers = {'Authorization': f'Bearer {api_key}'}
-                
-            def get_water_level(self, reservoir_id, timestamp):
-                # TODO: Implement actual API call
-                pass
+        try:
+            return APIClient(api_secrets['api_url'], api_secrets['api_key'])
+        except Exception as e:
+            self.logger.error(f"Failed to initialize API client: {e}")
+            return None
+
         
-        return APIClient(api_secrets['api_url'], api_secrets['api_key'])
+class APIClient:
+    def __init__(self, url, api_key):
+        self.url = url
+        self.headers = {'Authorization': f'Bearer {api_key}'}
+        self.client = httpx.Client(timeout=10.0)  # Add timeout
+        
+        # Test connection on init
+        try:
+            response = self.client.get(f"{self.url}/")
+            response.raise_for_status()
+            print(f"Successfully connected to API at {self.url}")
+        except Exception as e:
+            print(f"Warning: Could not connect to API at {self.url}: {e}")
+
+    def get_water_level(self, reservoir_id: str) -> dict:
+        try:
+            response = self.client.get(
+                f"{self.url}/water-level/{reservoir_id}",
+                headers=self.headers
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error getting water level: {e}")
+            raise
 
 class ScanScheduler:
     def __init__(self, directory: Path, handler: ModelResultsHandler, interval_minutes: int = 1):
@@ -143,6 +295,7 @@ class ScanScheduler:
         """Perform the scan and log the next scheduled run."""
         try:
             scan_directory(self.directory, self.handler)
+            self.handler.logger.info("Scan completed successfully.")
         except Exception as e:
             self.handler.logger.error(f"Error during scan: {e}")
         
@@ -162,10 +315,15 @@ def scan_directory(directory: Path, handler: ModelResultsHandler):
     """Scan the directory for any files that haven't been processed yet"""
     handler.logger.info("Scanning...")
     for file_path in directory.glob('*'):
-        if file_path.is_file() and file_path not in handler.processed_files:
-            handler.logger.info(f"New file found: {file_path.name}")
-            handler.process_file(file_path)
-            handler.processed_files.add(file_path)
+        if file_path.is_file():
+            file_name = file_path.name
+            if file_name not in handler.processed_files:
+                handler.logger.info(f"New file found: {file_name}")
+                try:
+                    handler.process_file(file_path)
+                    handler.mark_file_as_processed(file_name)
+                except Exception as e:
+                    handler.logger.error(f"Error processing file {file_name}: {e}")
 
 def start_monitoring(directory_path: str):
     target_dir = Path(directory_path)

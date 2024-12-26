@@ -36,7 +36,7 @@ def setup_local_secrets():
             Name='modtrack/api',
             SecretString=json.dumps({
                 'api_key': 'test_key',
-                'api_url': 'http://app:8000'
+                'api_url': 'http://mock-api:8000'  # Changed from mock-apiapp:8000
             })
         )
         print("Created API secrets")

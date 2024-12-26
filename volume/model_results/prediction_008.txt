@@ -1,0 +1,10 @@
+{
+    "timestamp": "2024-12-26T21:11:00Z",
+    "predictions": [
+        {
+            "reservoir_id": "reservoir_1",
+            "predicted_level": 125.5,
+            "validation_time": "2024-12-26T21:12:00Z"
+        }
+    ]
+}
