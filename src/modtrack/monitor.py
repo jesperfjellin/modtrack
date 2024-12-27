@@ -379,7 +379,7 @@ def start_monitoring(directory_path: str):
         handler.logger.info("Initial scan completed.")
 
         # Initialize the scheduler
-        scheduler = ScanScheduler(target_dir, handler, interval_minutes=1)
+        _ = ScanScheduler(target_dir, handler, interval_minutes=1)
 
         # Main loop to run scheduled jobs
         while True:
