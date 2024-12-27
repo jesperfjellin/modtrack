@@ -217,7 +217,36 @@ class ModelResultsHandler(FileSystemEventHandler):
             
             self.logger.info(f"Scheduled validation for prediction {pred['id']} at {iso_timestamp}")
     
-    
+    def cleanup_stale_predictions(self):
+        """Clean up predictions that are stuck in pending state"""
+        try:
+            with self.db_connection.cursor() as cur:
+                # Find and update predictions that are:
+                # 1. More than 5 minutes past their validation_time
+                # 2. Don't have a corresponding validation record
+                cur.execute("""
+                    INSERT INTO validations (id, prediction_id, actual_level, difference, validated_at)
+                    SELECT 
+                        uuid_generate_v4(),
+                        p.id,
+                        0,  -- placeholder actual_level
+                        0,  -- placeholder difference
+                        NOW()
+                    FROM predictions p
+                    LEFT JOIN validations v ON p.id = v.prediction_id
+                    WHERE 
+                        v.id IS NULL  -- no validation record exists
+                        AND p.validation_time < NOW() - INTERVAL '5 minutes'
+                    RETURNING prediction_id;
+                """)
+                
+                stale_count = cur.rowcount
+                if stale_count > 0:
+                    self.logger.info(f"Marked {stale_count} stale predictions as failed")
+                
+                self.db_connection.commit()
+        except Exception as e:
+            self.logger.error(f"Error cleaning up stale predictions: {e}")
 
     def init_db_connection(self, secrets_dict=None):
         """Initialize database connection."""
@@ -285,11 +314,20 @@ class ScanScheduler:
         self.directory = directory
         self.handler = handler
         self.interval = interval_minutes
-        self.job = schedule.every(self.interval).minutes.do(self.scan_and_log)
         
+        # Schedule regular scans
+        self.scan_job = schedule.every(self.interval).minutes.do(self.scan_and_log)
+        
+        # Schedule cleanup every 5 minutes
+        self.cleanup_job = schedule.every(5).minutes.do(self.cleanup_stale_predictions)
+
         # Calculate the initial next_run_time
         self.next_run_time = datetime.now(timezone.utc) + timedelta(minutes=self.interval)
         self.log_next_run(initial=True)
+
+    def cleanup_stale_predictions(self):
+        """Run the cleanup for stale predictions"""
+        self.handler.cleanup_stale_predictions()
 
     def scan_and_log(self):
         """Perform the scan and log the next scheduled run."""

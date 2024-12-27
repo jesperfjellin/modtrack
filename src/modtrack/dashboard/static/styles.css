@@ -192,6 +192,11 @@ th {
     margin: 20px 0;
 }
 
+.badge.failed {
+    background-color: #95a5a6;  /* Gray color for failed status */
+    color: white;
+}
+
 .button {
     display: inline-block;
     padding: 10px 20px;

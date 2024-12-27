@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ..aws_utils import SecretsManager
 
 router = FastAPI()
@@ -90,7 +90,8 @@ async def home(request: Request):
                 "records": records,
                 "stats": stats,
                 "reservoir_stats": reservoir_stats,
-                "current_time": datetime.utcnow()
+                "current_time": datetime.now(timezone.utc),  # Make timezone-aware
+                "timedelta": timedelta  # Pass timedelta to template
             }
         )
 
@@ -159,7 +160,8 @@ async def get_accuracy_data():
 
     try:
         cur.execute("""
-            SELECT 
+            SELECT
+                p.reservoir_id,
                 v.validated_at as timestamp,
                 v.actual_level - p.predicted_level as deviation
             FROM predictions p
@@ -168,11 +170,20 @@ async def get_accuracy_data():
             ORDER BY v.validated_at ASC
         """)
         data = cur.fetchall()
-        
-        return {
-            "timestamps": [row["timestamp"].isoformat() for row in data],
-            "deviations": [float(row["deviation"]) for row in data]
-        }
+
+        # Group by reservoir
+        reservoirs = {}
+        for row in data:
+            reservoir_id = row["reservoir_id"]
+            if reservoir_id not in reservoirs:
+                reservoirs[reservoir_id] = {
+                    "timestamps": [],
+                    "deviations": []
+                }
+            reservoirs[reservoir_id]["timestamps"].append(row["timestamp"].isoformat())
+            reservoirs[reservoir_id]["deviations"].append(float(row["deviation"]))
+
+        return reservoirs
     finally:
         cur.close()
         conn.close()

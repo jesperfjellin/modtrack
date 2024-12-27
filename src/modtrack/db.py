@@ -8,6 +8,9 @@ def init_db_schema(conn: psycopg2.extensions.connection) -> None:
     """Initialize database schema if it doesn't exist"""
     with conn.cursor() as cur:
         # Create predictions table
+
+        cur.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
                 id UUID PRIMARY KEY,

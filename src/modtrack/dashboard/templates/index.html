@@ -5,6 +5,7 @@
     <link href="/dashboard/static/styles.css" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 </head>
 <body>
     <div class="container">
@@ -92,13 +93,7 @@
                             {% endif %}
                         </td>
                         <td>{{ record.prediction_timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                        <td>
-                            {% if record.validated_at %}
-                                {{ record.validated_at.strftime('%Y-%m-%d %H:%M:%S') }}
-                            {% else %}
-                                Expected: {{ record.validation_time.strftime('%Y-%m-%d %H:%M:%S') }}
-                            {% endif %}
-                        </td>
+                        <td>{{ record.validation_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                         <td>
                             {% if record.actual_level %}
                                 {% if record.difference < 5 %}
@@ -108,6 +103,8 @@
                                 {% else %}
                                     <span class="status error">Poor</span>
                                 {% endif %}
+                            {% elif record.validation_time < current_time %}
+                                <span class="status failed">Failed</span>
                             {% else %}
                                 <span class="status pending">Pending</span>
                             {% endif %}
@@ -128,70 +125,95 @@
     </div>
     {% endif %}
     <!-- Add this at the end of the body, before closing body tag -->
-<script>
-    document.addEventListener('DOMContentLoaded', async function() {
-        // Fetch the accuracy data
-        const response = await fetch('/dashboard/api/accuracy-data');
-        const data = await response.json();
+    <script>
+        document.addEventListener('DOMContentLoaded', async function() {
+            // Define colors for each reservoir
+            const reservoirColors = {
+                'reservoir_1': { border: '#3498db', background: 'rgba(52, 152, 219, 0.1)' },
+                'reservoir_2': { border: '#e74c3c', background: 'rgba(231, 76, 60, 0.1)' },
+                'reservoir_3': { border: '#2ecc71', background: 'rgba(46, 204, 113, 0.1)' }
+            };
     
-        // Create the chart
-        const ctx = document.getElementById('accuracyChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: data.timestamps.map(t => new Date(t).toLocaleTimeString()),
-                datasets: [{
-                    label: 'Prediction Deviation',
-                    data: data.deviations,
-                    borderColor: '#3498db',
-                    backgroundColor: 'rgba(52, 152, 219, 0.1)',
-                    fill: true,
-                    tension: 0.4
-                }, {
-                    label: 'Perfect Prediction (0)',
-                    data: new Array(data.timestamps.length).fill(0),
-                    borderColor: '#27ae60',
-                    borderWidth: 1,
-                    borderDash: [5, 5],
-                    fill: false
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    title: {
-                        display: true,
-                        text: 'Prediction Accuracy (Deviation from Actual Values)'
-                    },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                    }
+            // Fetch the accuracy data
+            const response = await fetch('/dashboard/api/accuracy-data');
+            const reservoirs = await response.json();
+            
+            // Create datasets for each reservoir
+            const datasets = Object.entries(reservoirs).map(([reservoirId, data]) => ({
+                label: `${reservoirId} Deviation`,
+                data: data.deviations,
+                borderColor: reservoirColors[reservoirId].border,
+                backgroundColor: reservoirColors[reservoirId].background,
+                fill: true,
+                tension: 0.4
+            }));
+    
+            // Add the perfect prediction line
+            const timestamps = Object.values(reservoirs)[0]?.timestamps || [];
+            datasets.push({
+                label: 'Perfect Prediction (0)',
+                data: new Array(timestamps.length).fill(0),
+                borderColor: '#27ae60',
+                borderWidth: 1,
+                borderDash: [5, 5],
+                fill: false
+            });
+    
+            // Create the chart
+            const ctx = document.getElementById('accuracyChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timestamps,
+                    datasets: datasets
                 },
-                scales: {
-                    y: {
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
                         title: {
                             display: true,
-                            text: 'Deviation (meters)'
+                            text: 'Prediction Accuracy by Reservoir'
                         },
-                        grid: {
-                            color: 'rgba(0, 0, 0, 0.1)'
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
                         }
                     },
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Time'
+                    scales: {
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Deviation (meters)'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            }
                         },
-                        grid: {
-                            color: 'rgba(0, 0, 0, 0.1)'
+                        x: {
+                            type: 'time',  // Use time scale
+                            time: {
+                                unit: 'hour',
+                                displayFormats: {
+                                    hour: 'HH:mm'  // Show only hours and minutes
+                                }
+                            },
+                            ticks: {
+                                maxRotation: 45,  // Rotate labels for better fit
+                                maxTicksLimit: 8   // Limit number of ticks shown
+                            },
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            }
                         }
                     }
                 }
-            }
+            });
         });
-    });
     </script>
 </body>
 </html>
