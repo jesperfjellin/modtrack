@@ -9,6 +9,7 @@ import csv
 from .aws_utils import SecretsManager, EventBridge
 from .config import Config
 from .db import init_db_schema
+from .celery_app import validate_prediction_task
 import psycopg2
 from typing import Optional
 import os
@@ -18,26 +19,26 @@ import uuid
 
 class ModelResultsHandler(FileSystemEventHandler):
     PROCESSED_FILES_CSV = 'processed_files.csv'
-    
+
     def __init__(self, target_directory: Path):
         # Initialize logger first
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
-        
+
         self.target_directory = target_directory
         self.processed_files = set()
-        
+
         # Path to the .csv file
         self.processed_files_path = self.target_directory / self.PROCESSED_FILES_CSV
-        
+
         # Initialize with retries
         self.db_connection = None
         self.api_client = None
         self.event_bridge = None
-        
+
         # Try to initialize connections with retries
         self._initialize_with_retries()
-        
+
         # Load processed files from the CSV
         self._load_processed_files()
 
@@ -45,21 +46,21 @@ class ModelResultsHandler(FileSystemEventHandler):
         init_db_schema(self.db_connection)
 
     def _initialize_with_retries(self, max_retries=5, delay=2):
-        """Initialize connections with retries"""
+        """Initialize connections with retries."""
         for attempt in range(max_retries):
             try:
                 # Initialize AWS services and get secrets first
                 secrets = SecretsManager()
                 self.db_secrets = secrets.get_secret(Config.DB_SECRET_NAME)
                 self.api_secrets = secrets.get_secret(Config.API_SECRET_NAME)
-                
+
                 # Initialize connections using secrets
                 self.db_connection = self.init_db_connection(self.db_secrets)
                 self.api_client = self.init_api_client(self.api_secrets)
-                
+
                 # Initialize EventBridge
                 self.event_bridge = EventBridge()
-                
+
                 self.logger.info("Successfully initialized all connections")
                 return
             except Exception as e:
@@ -78,7 +79,7 @@ class ModelResultsHandler(FileSystemEventHandler):
             self.processed_files_path.touch()
             self.logger.info(f"Created new processed files tracking CSV at {self.processed_files_path}")
             return
-        
+
         try:
             with self.processed_files_path.open(mode='r', newline='') as csvfile:
                 reader = csv.reader(csvfile)
@@ -101,11 +102,13 @@ class ModelResultsHandler(FileSystemEventHandler):
             raise
 
     def on_created(self, event):
+        """Handler for new file creation events."""
         if event.is_directory:
             return
-        
+
         file_path = Path(event.src_path)
         file_name = file_path.name
+
         if file_name not in self.processed_files:
             self.logger.info(f"New file detected: {file_name}")
             try:
@@ -115,57 +118,86 @@ class ModelResultsHandler(FileSystemEventHandler):
                 self.logger.error(f"Error processing file {file_name}: {e}")
 
     def process_file(self, file_path: Path) -> None:
-        self.logger.info(f"New file found: {file_path.name}")
+        """
+        Parses the JSON file of predictions, inserts them into the DB,
+        and enqueues Celery tasks to validate at 'validation_time'.
+        """
+        self.logger.info(f"Processing new file: {file_path.name}")
 
         try:
             with open(file_path) as f:
                 data = json.load(f)
 
-            # Process each prediction
             for prediction in data["predictions"]:
-                prediction_id = str(uuid.uuid4())  # Convert UUID to string
+                prediction_id = str(uuid.uuid4())
                 reservoir_id = prediction["reservoir_id"]
                 predicted_level = prediction["predicted_level"]
-                prediction_timestamp = datetime.fromisoformat(data["timestamp"].replace('Z', '+00:00'))
-                validation_time = datetime.fromisoformat(prediction["validation_time"].replace('Z', '+00:00'))
 
-                # Store prediction in database
+                # Convert timestamps from ISO 8601
+                prediction_timestamp = datetime.fromisoformat(
+                    data["timestamp"].replace('Z', '+00:00')
+                )
+                validation_time = datetime.fromisoformat(
+                    prediction["validation_time"].replace('Z', '+00:00')
+                )
+
+                # 1) Insert into DB so we have a record of this prediction
                 with self.db_connection.cursor() as cur:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO predictions
                         (id, reservoir_id, predicted_level, prediction_timestamp,
                         validation_time, file_name)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (
-                        prediction_id,  # Now a string
-                        reservoir_id,
-                        predicted_level,
-                        prediction_timestamp,
-                        validation_time,
-                        file_path.name
-                    ))
+                        """,
+                        (
+                            prediction_id,
+                            reservoir_id,
+                            predicted_level,
+                            prediction_timestamp,
+                            validation_time,
+                            file_path.name
+                        )
+                    )
                     self.db_connection.commit()
 
-                # Schedule the validation check
-                schedule.every().day.at(validation_time.strftime("%H:%M")).do(
-                    self.validate_prediction,
-                    prediction_id=prediction_id,
-                    reservoir_id=reservoir_id,
-                    predicted_level=predicted_level
-                )
-                self.logger.info(f"Scheduled validation for reservoir {reservoir_id} at {validation_time}")
+                # 2) Compute how many seconds from now until 'validation_time'.
+                #    If it's already in the past, run immediately.
+                now_utc = datetime.now(timezone.utc)
+                diff_seconds = (validation_time - now_utc).total_seconds()
 
-            self.logger.info(f"Successfully processed file: {file_path.name}")
+                if diff_seconds <= 0:
+                    # The validation time has passed (or is now),
+                    # so let's enqueue the task to run immediately.
+                    validate_prediction_task.delay(prediction_id, reservoir_id, predicted_level)
+                    self.logger.info(
+                        f"Validation time is already past. Running validation now for {reservoir_id}."
+                    )
+                else:
+                    # The validation time is in the future, so schedule it for that time.
+                    # 'countdown' is how many seconds from now Celery should wait.
+                    validate_prediction_task.apply_async(
+                        args=[prediction_id, reservoir_id, predicted_level],
+                        countdown=diff_seconds
+                    )
+                    self.logger.info(
+                        f"Scheduled validation task for reservoir {reservoir_id} in {diff_seconds:.1f} seconds "
+                        f"(at {validation_time.isoformat()})."
+                    )
 
         except Exception as e:
             self.logger.error(f"Error processing file {file_path}: {str(e)}")
             return
-    
+
     def validate_prediction(self, prediction_id: str, reservoir_id: str, predicted_level: float) -> None:
+        """
+        This method is no longer called directly in a Celery-based design,
+        but you can keep it for reference or local debug if needed.
+        """
         try:
             self.logger.info(f"Attempting to validate prediction {prediction_id} for reservoir {reservoir_id}")
             self.logger.info(f"Using API URL: {self.api_secrets['api_url']}")
-            
+
             # Get actual water level from API
             response = self.api_client.get_water_level(reservoir_id)
             actual_level = response["water_level"]
@@ -177,17 +209,20 @@ class ModelResultsHandler(FileSystemEventHandler):
 
             # Store validation result
             with self.db_connection.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO validations
                     (id, prediction_id, actual_level, difference, validated_at)
                     VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    str(uuid.uuid4()),  # Convert UUID to string
-                    prediction_id,      # Already a string from process_file
-                    actual_level,
-                    difference,
-                    datetime.now(timezone.utc)
-                ))
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        prediction_id,
+                        actual_level,
+                        difference,
+                        datetime.now(timezone.utc)
+                    )
+                )
                 self.db_connection.commit()
 
             self.logger.info(
@@ -199,31 +234,26 @@ class ModelResultsHandler(FileSystemEventHandler):
 
         except Exception as e:
             self.logger.error(f"Error validating prediction for {reservoir_id}: {str(e)}")
-            self.logger.error(f"Full error details: ", exc_info=True)
+            self.logger.error("Full error details: ", exc_info=True)
 
     def schedule_validations(self, predictions):
-        """Schedule validation checks using EventBridge"""
+        """(Optional) If you still want to use EventBridge for scheduling."""
         for pred in predictions:
-            # Convert timestamp to ISO 8601 format
             iso_timestamp = pred['target_timestamp'].astimezone(timezone.utc).isoformat()
-            
             self.event_bridge.schedule_validation(
                 prediction_id=pred['id'],
                 target_timestamp=iso_timestamp
             )
-            
             self.logger.info(f"Scheduled validation for prediction {pred['id']} at {iso_timestamp}")
-    
+
     def cleanup_stale_predictions(self):
-        """Clean up predictions that are stuck in pending state"""
+        """Clean up predictions that are stuck in pending state."""
         try:
             with self.db_connection.cursor() as cur:
-                # Find and update predictions that are:
-                # 1. More than 5 minutes past their validation_time
-                # 2. Don't have a corresponding validation record
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO validations (id, prediction_id, actual_level, difference, validated_at)
-                    SELECT 
+                    SELECT
                         uuid_generate_v4(),
                         p.id,
                         0,  -- placeholder actual_level
@@ -231,16 +261,16 @@ class ModelResultsHandler(FileSystemEventHandler):
                         NOW()
                     FROM predictions p
                     LEFT JOIN validations v ON p.id = v.prediction_id
-                    WHERE 
-                        v.id IS NULL  -- no validation record exists
+                    WHERE
+                        v.id IS NULL
                         AND p.validation_time < NOW() - INTERVAL '5 minutes'
                     RETURNING prediction_id;
-                """)
-                
+                    """
+                )
                 stale_count = cur.rowcount
                 if stale_count > 0:
                     self.logger.info(f"Marked {stale_count} stale predictions as failed")
-                
+
                 self.db_connection.commit()
         except Exception as e:
             self.logger.error(f"Error cleaning up stale predictions: {e}")
@@ -252,7 +282,7 @@ class ModelResultsHandler(FileSystemEventHandler):
             secrets_dict = {
                 'username': 'postgres',
                 'password': 'postgres',
-                'host': 'postgres',  # Changed from localhost to postgres
+                'host': 'postgres',
                 'port': 5432,
                 'dbname': 'postgres'
             }
@@ -262,7 +292,7 @@ class ModelResultsHandler(FileSystemEventHandler):
                 dbname=secrets_dict.get('dbname', 'postgres'),
                 user=secrets_dict.get('username', 'postgres'),
                 password=secrets_dict.get('password', 'postgres'),
-                host=secrets_dict.get('host', 'postgres'),  # Changed default from localhost to postgres
+                host=secrets_dict.get('host', 'postgres'),
                 port=secrets_dict.get('port', 5432)
             )
             self.logger.info("Successfully connected to database")
@@ -272,7 +302,7 @@ class ModelResultsHandler(FileSystemEventHandler):
             raise
 
     def init_api_client(self, api_secrets):
-        """Initialize API client using secrets"""
+        """Initialize API client using secrets."""
         try:
             return APIClient(api_secrets['api_url'], api_secrets['api_key'])
         except Exception as e:

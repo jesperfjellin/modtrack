@@ -24,15 +24,63 @@ def get_db_connection():
     )
 
 @router.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+async def home(request: Request, page: int = 1, limit: int = 20):
     conn = get_db_connection()
     cur = conn.cursor()
-    
     try:
-        # Get recent predictions with their validations
+        #
+        # All-time stats
+        #
         cur.execute("""
-            SELECT 
-                p.id,
+            SELECT
+                COUNT(*) as total_predictions,
+                ROUND(AVG(v.difference)::numeric, 2) as avg_difference,
+                ROUND(MAX(v.difference)::numeric, 2) as max_difference,
+                ROUND(MIN(v.difference)::numeric, 2) as min_difference,
+                COUNT(v.id) as validated_count
+            FROM predictions p
+            LEFT JOIN validations v ON p.id = v.prediction_id
+        """)
+        stats = cur.fetchone()
+        
+        # success rate
+        if stats['total_predictions'] > 0:
+            stats['success_rate'] = round(
+                (stats['validated_count'] / stats['total_predictions']) * 100, 1
+            )
+        else:
+            stats['success_rate'] = 0
+
+        #
+        # All-time reservoir stats
+        #
+        cur.execute("""
+            SELECT
+                p.reservoir_id,
+                COUNT(*) as prediction_count,
+                ROUND(AVG(v.difference)::numeric, 2) as avg_difference
+            FROM predictions p
+            LEFT JOIN validations v ON p.id = v.prediction_id
+            GROUP BY p.reservoir_id
+            ORDER BY p.reservoir_id
+        """)
+        reservoir_stats = cur.fetchall()
+
+        #
+        # Pagination: Retrieve records
+        #
+        # 1) total count
+        cur.execute("SELECT COUNT(*) as total FROM predictions")
+        row = cur.fetchone()
+        total_predictions = row["total"]
+
+        # 2) limit/offset logic
+        page = max(page, 1)
+        limit = max(limit, 1)
+        offset = (page - 1) * limit
+
+        query = f"""
+            SELECT
                 p.reservoir_id,
                 p.predicted_level,
                 p.prediction_timestamp,
@@ -43,67 +91,34 @@ async def home(request: Request):
             FROM predictions p
             LEFT JOIN validations v ON p.id = v.prediction_id
             ORDER BY p.prediction_timestamp DESC
-            LIMIT 50
-        """)
+            LIMIT {limit} OFFSET {offset}
+        """
+        cur.execute(query)
         records = cur.fetchall()
-        
-        # Calculate statistics for the last 24 hours
-        cur.execute("""
-            SELECT 
-                COUNT(*) as total_predictions,
-                ROUND(AVG(v.difference)::numeric, 2) as avg_difference,
-                ROUND(MAX(v.difference)::numeric, 2) as max_difference,
-                ROUND(MIN(v.difference)::numeric, 2) as min_difference,
-                COUNT(v.id) as validated_count
-            FROM predictions p
-            LEFT JOIN validations v ON p.id = v.prediction_id
-            WHERE p.prediction_timestamp >= NOW() - INTERVAL '24 hours'
-        """)
-        stats = cur.fetchone()
 
-        # Get validation success rate
-        if stats['total_predictions'] > 0:
-            stats['success_rate'] = round(
-                (stats['validated_count'] / stats['total_predictions']) * 100, 1
-            )
-        else:
-            stats['success_rate'] = 0
-
-        # Get reservoir-specific statistics
-        cur.execute("""
-            SELECT 
-                p.reservoir_id,
-                COUNT(*) as prediction_count,
-                ROUND(AVG(v.difference)::numeric, 2) as avg_difference
-            FROM predictions p
-            LEFT JOIN validations v ON p.id = v.prediction_id
-            WHERE p.prediction_timestamp >= NOW() - INTERVAL '24 hours'
-            GROUP BY p.reservoir_id
-            ORDER BY p.reservoir_id
-        """)
-        reservoir_stats = cur.fetchall()
+        # 3) total pages
+        total_pages = (total_predictions + limit - 1) // limit
 
         return templates.TemplateResponse(
             "index.html",
             {
                 "request": request,
-                "records": records,
                 "stats": stats,
                 "reservoir_stats": reservoir_stats,
-                "current_time": datetime.now(timezone.utc),  # Make timezone-aware
-                "timedelta": timedelta  # Pass timedelta to template
+                "records": records,
+                "current_time": datetime.now(timezone.utc),
+                "timedelta": timedelta,
+                "page": page,
+                "limit": limit,
+                "total_pages": total_pages,
+                "total_predictions": total_predictions
             }
         )
-
     except Exception as e:
-        # Log the error and return an error page
-        print(f"Error accessing database: {e}")
+        print(f"Error: {e}")
         return templates.TemplateResponse(
             "error.html",
-            {
-                "request": request,
-                "error_message": "Failed to load dashboard data"
-            }
+            {"request": request, "error_message": "Failed to load data"}
         )
     finally:
         cur.close()
@@ -166,7 +181,6 @@ async def get_accuracy_data():
                 v.actual_level - p.predicted_level as deviation
             FROM predictions p
             JOIN validations v ON p.id = v.prediction_id
-            WHERE v.validated_at >= NOW() - INTERVAL '24 hours'
             ORDER BY v.validated_at ASC
         """)
         data = cur.fetchall()

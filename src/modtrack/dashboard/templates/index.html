@@ -17,7 +17,7 @@
         <!-- Statistics Summary -->
         <div class="stats-container">
             <div class="stat-box">
-                <h3>Last 24 Hours</h3>
+                <h3>All-Time Statistics</h3>
                 <div class="stat-grid">
                     <div class="stat-item">
                         <span class="stat-label">Total Predictions</span>
@@ -113,6 +113,15 @@
                     {% endfor %}
                 </tbody>
             </table>
+        </div>
+        <div class="pagination">
+            {% if page > 1 %}
+                <a href="?page={{ page - 1 }}&limit={{ limit }}">Previous</a>
+            {% endif %}
+            <span>Page {{ page }} of {{ total_pages }}</span>
+            {% if page < total_pages %}
+                <a href="?page={{ page + 1 }}&limit={{ limit }}">Next</a>
+            {% endif %}
         </div>
     </div>
 

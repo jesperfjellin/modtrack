@@ -48,6 +48,28 @@ services:
       - app-network
     ports:
       - "8000:8000"
+  redis:
+    image: redis:latest
+    networks:
+      - app-network
+    ports:
+      - "6379:6379"
+    
+  celery-worker:
+    build: .
+    depends_on:
+      - app
+      - redis
+    networks:
+      - app-network
+    command: celery -A src.modtrack.celery_app:celery_app worker --loglevel=INFO
+    volumes:
+      - ./volume/model_results:/data/model_results
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - ENVIRONMENT=local
 
 networks:
   app-network:

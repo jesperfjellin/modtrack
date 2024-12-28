@@ -14,5 +14,4 @@ COPY README.md .
 # Install the package
 RUN pip install -e .
 
-# Command to run the application
 CMD ["python", "-m", "modtrack.main", "--directory", "/data/model_results"]
