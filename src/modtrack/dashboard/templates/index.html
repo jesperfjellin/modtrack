@@ -4,34 +4,70 @@
     <title>ModTrack Dashboard</title>
     <link href="/dashboard/static/styles.css" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Chart.js + date-fns adapter for time-based charts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+    <!-- (Optional) Quick inline style for pointer cursor on table rows -->
+    <style>
+      /* Make table rows with data-id appear clickable */
+      tr[data-id] {
+        cursor: pointer;
+      }
+      /* Basic modal styling if you haven't already defined it in styles.css */
+      .modal {
+        position: fixed;
+        z-index: 9999;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+        background-color: rgba(0,0,0,0.3);
+      }
+      .modal-content {
+        background-color: #fff;
+        margin: 6% auto;
+        padding: 20px;
+        width: 500px;
+        border-radius: 4px;
+        position: relative;
+      }
+      .close {
+        float: right;
+        font-size: 1.4rem;
+        font-weight: bold;
+        cursor: pointer;
+      }
+    </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>ModTrack Dashboard</h1>
+            <!-- Show the time the page was rendered on the server side -->
             <p class="timestamp">Last updated: {{ current_time.strftime('%Y-%m-%d %H:%M:%S UTC') }}</p>
         </header>
 
+        <!-- Filter Form -->
         <form id="filterForm">
             <label for="reservoirSelect">Filter by Reservoir:</label>
             <select id="reservoirSelect" name="reservoir_id">
-              <option value="">All</option>
-              <option value="reservoir_1">Reservoir 1</option>
-              <option value="reservoir_2">Reservoir 2</option>
-              <option value="reservoir_3">Reservoir 3</option>
+                <option value="">All</option>
+                <option value="reservoir_1">Reservoir 1</option>
+                <option value="reservoir_2">Reservoir 2</option>
+                <option value="reservoir_3">Reservoir 3</option>
             </select>
-  
+
             <label for="startDate">Start Date:</label>
             <input type="date" id="startDate" name="start_date" />
-  
+
             <label for="endDate">End Date:</label>
             <input type="date" id="endDate" name="end_date" />
-  
+
             <button type="submit">Apply</button>
-          </form>
-        
+        </form>
+
         <!-- Statistics Summary -->
         <div class="stats-container">
             <div class="stat-box">
@@ -57,6 +93,7 @@
             </div>
         </div>
 
+        <!-- Chart Container -->
         <div class="chart-container">
             <h3>Prediction Accuracy Over Time</h3>
             <canvas id="accuracyChart"></canvas>
@@ -93,7 +130,8 @@
                 </thead>
                 <tbody>
                     {% for record in records %}
-                    <tr>
+                    <!-- Add data-id to make it clickable -->
+                    <tr data-id="{{ record.id }}">
                         <td>{{ record.reservoir_id }}</td>
                         <td>{{ "%.2f"|format(record.predicted_level) }}m</td>
                         <td>
@@ -132,6 +170,17 @@
                 </tbody>
             </table>
         </div>
+
+        <!-- Modal for Drill-Down -->
+        <div id="detailModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <span id="closeModal" class="close">&times;</span>
+                <h3>Prediction Details</h3>
+                <div id="modalBody"></div>
+            </div>
+        </div>
+
+        <!-- Pagination -->
         <div class="pagination">
             {% if page > 1 %}
                 <a href="?page={{ page - 1 }}&limit={{ limit }}">Previous</a>
@@ -151,153 +200,218 @@
         </div>
     </div>
     {% endif %}
-    <!-- Add this at the end of the body, before closing body tag -->
+
     <script>
-        let myChart;  // Keep chart instance in a variable we can reuse
-      
-        // A helper function for the "Status" cell, replicating your Jinja logic
-        function computeStatus(record) {
-          const now = new Date();
-          const validationDate = new Date(record.validation_time);
-      
-          if (record.actual_level != null) {
-            if (record.difference < 5) return '<span class="status good">Good</span>';
-            if (record.difference < 10) return '<span class="status warning">Warning</span>';
-            return '<span class="status error">Poor</span>';
+      let myChart = null;
+
+      // replicate Jinja "status" logic in JS for dynamic table
+      function computeStatus(record) {
+        const now = new Date();
+        const validationDate = new Date(record.validation_time);
+
+        if (record.actual_level != null) {
+          if (record.difference < 5) return '<span class="status good">Good</span>';
+          if (record.difference < 10) return '<span class="status warning">Warning</span>';
+          return '<span class="status error">Poor</span>';
+        } else {
+          if (validationDate < now) {
+            return '<span class="status failed">Failed</span>';
           } else {
-            if (validationDate < now) return '<span class="status failed">Failed</span>';
             return '<span class="status pending">Pending</span>';
           }
         }
-      
-        // A helper function to (re)build the chart
-        function rebuildChart(chartData) {
-          // reservoirColors can be defined globally here if you like:
-          const reservoirColors = {
-            'reservoir_1': { border: '#3498db', background: 'rgba(52, 152, 219, 0.1)' },
-            'reservoir_2': { border: '#e74c3c', background: 'rgba(231, 76, 60, 0.1)' },
-            'reservoir_3': { border: '#2ecc71', background: 'rgba(46, 204, 113, 0.1)' }
-          };
-      
-          // Convert the JSON data into labels/datasets
-          const labels = Object.values(chartData)[0]?.timestamps || [];
-          const datasets = Object.entries(chartData).map(([resId, vals]) => ({
-            label: `${resId} Deviation`,
-            data: vals.deviations,
-            borderColor: reservoirColors[resId]?.border || '#888',
-            backgroundColor: reservoirColors[resId]?.background || 'rgba(128,128,128,0.1)',
-            fill: true,
-            tension: 0.4
-          }));
-      
-          // Perfect prediction line
-          datasets.push({
-            label: 'Perfect Prediction (0)',
-            data: new Array(labels.length).fill(0),
-            borderColor: '#27ae60',
-            borderWidth: 1,
-            borderDash: [5, 5],
-            fill: false
-          });
-      
-          // If a chart already exists, destroy it before creating a new one
-          if (myChart) {
-            myChart.destroy();
+      }
+
+      // handle row click => fetch detail
+      async function openDetailModal(predictionId) {
+        try {
+          const resp = await fetch(`/dashboard/api/predictions/${predictionId}`);
+          if (!resp.ok) {
+            console.error("Error fetching detail:", resp.statusText);
+            return;
           }
-      
-          const ctx = document.getElementById('accuracyChart').getContext('2d');
-          myChart = new Chart(ctx, {
-            type: 'line',
-            data: { labels, datasets },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
+          const detailData = await resp.json();
+
+          // fill detail
+          const modalBody = document.getElementById('modalBody');
+          modalBody.innerHTML = `
+            <p><strong>ID:</strong> ${detailData.id}</p>
+            <p><strong>File Name:</strong> ${detailData.file_name ?? 'N/A'}</p>
+            <p><strong>Reservoir:</strong> ${detailData.reservoir_id}</p>
+            <p><strong>Predicted Level:</strong> ${detailData.predicted_level ?? '-'}</p>
+            <p><strong>Actual Level:</strong> ${detailData.actual_level ?? 'Pending'}</p>
+            <p><strong>Difference:</strong> ${detailData.difference ?? '-'} </p>
+            <p><strong>Validation Time:</strong> ${detailData.validation_time ?? '-'} </p>
+          `;
+          document.getElementById('detailModal').style.display = 'block';
+        } catch (err) {
+          console.error("Modal fetch error:", err);
+        }
+      }
+
+      // close modal on X
+      document.addEventListener('DOMContentLoaded', () => {
+        const closeModal = document.getElementById('closeModal');
+        closeModal.addEventListener('click', () => {
+          document.getElementById('detailModal').style.display = 'none';
+        });
+      });
+
+      // chart rebuild
+      function rebuildChart(data) {
+        // color dictionary
+        const reservoirColors = {
+          'reservoir_1': { border: '#3498db', background: 'rgba(52,152,219,0.1)' },
+          'reservoir_2': { border: '#e74c3c', background: 'rgba(231,76,60,0.1)' },
+          'reservoir_3': { border: '#2ecc71', background: 'rgba(46,204,113,0.1)' },
+        };
+
+        // figure out labels from first reservoir
+        const labels = Object.values(data)[0]?.timestamps || [];
+        const datasets = Object.entries(data).map(([resId, vals]) => ({
+          label: `${resId} Deviation`,
+          data: vals.deviations,
+          borderColor: reservoirColors[resId]?.border || '#555',
+          backgroundColor: reservoirColors[resId]?.background || 'rgba(85,85,85,0.2)',
+          fill: true,
+          tension: 0.4
+        }));
+
+        // add perfect prediction line
+        datasets.push({
+          label: 'Perfect Prediction (0)',
+          data: new Array(labels.length).fill(0),
+          borderColor: '#27ae60',
+          borderDash: [5,5],
+          fill: false
+        });
+
+        // destroy old chart if present
+        if (myChart) {
+          myChart.destroy();
+        }
+
+        const ctx = document.getElementById('accuracyChart').getContext('2d');
+        myChart = new Chart(ctx, {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              title: {
+                display: true,
+                text: 'Prediction Accuracy by Reservoir'
+              },
+              tooltip: {
+                mode: 'index',
+                intersect: false
+              }
+            },
+            scales: {
+              y: {
                 title: {
                   display: true,
-                  text: 'Prediction Accuracy by Reservoir'
-                },
-                tooltip: {
-                  mode: 'index',
-                  intersect: false
+                  text: 'Deviation (meters)'
                 }
               },
-              scales: {
-                y: {
-                  title: { display: true, text: 'Deviation (meters)' }
+              x: {
+                type: 'time',
+                time: {
+                  unit: 'hour'
                 },
-                x: {
-                  type: 'time',
-                  time: { unit: 'hour' },
-                  ticks: { maxRotation: 45, maxTicksLimit: 8 },
-                  title: { display: true, text: 'Time' }
+                ticks: {
+                  maxRotation: 45,
+                  maxTicksLimit: 8
+                },
+                title: {
+                  display: true,
+                  text: 'Time'
                 }
               }
             }
-          });
-        }
-      
-        // An init function to load the *initial* chart data on page load
-        async function initChart() {
-          const resp = await fetch('/dashboard/api/accuracy-data');
-          const data = await resp.json();
+          }
+        });
+      }
+
+      // load initial chart
+      async function initChart() {
+        try {
+          const r = await fetch('/dashboard/api/accuracy-data');
+          if (!r.ok) {
+            console.error("Error loading chart data:", r.statusText);
+            return;
+          }
+          const data = await r.json();
           rebuildChart(data);
+        } catch (err) {
+          console.error("initChart error:", err);
         }
-      
-        document.addEventListener('DOMContentLoaded', function() {
-          // 1) Build the chart at page load (all data)
-          initChart();
-      
-          // 2) Set up the filter form listener
-          const filterForm = document.getElementById('filterForm');
-          filterForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-      
-            const reservoir = document.getElementById('reservoirSelect').value;
-            const start = document.getElementById('startDate').value;
-            const end = document.getElementById('endDate').value;
-      
-            let query = "";
-            if (reservoir) query += `reservoir_id=${reservoir}&`;
-            if (start) query += `start_date=${start}&`;
-            if (end) query += `end_date=${end}&`;
-            if (query.endsWith('&')) query = query.slice(0, -1);
-      
-            // Update table
-            const response = await fetch(`/dashboard/api/filter-predictions?${query}`);
-            if (!response.ok) {
-              console.error("Filter endpoint error:", response.statusText);
-              return;
-            }
-            const tableData = await response.json();
-      
-            // Re-render table rows
-            const tbody = document.querySelector('table tbody');
-            tbody.innerHTML = "";
-            tableData.forEach((record) => {
-              const row = document.createElement('tr');
-              row.innerHTML = `
-                <td>${record.reservoir_id}</td>
-                <td>${record.predicted_level.toFixed(2)}m</td>
-                <td>${record.actual_level != null ? record.actual_level.toFixed(2)+'m' : 'Pending'}</td>
-                <td>${record.difference != null ? record.difference.toFixed(2)+'m' : '-'}</td>
-                <td>${record.prediction_timestamp}</td>
-                <td>${record.validation_time}</td>
-                <td>${computeStatus(record)}</td>
-              `;
-              tbody.appendChild(row);
-            });
-      
-            // Optionally update the chart with the same filters
-            const chartResp = await fetch(`/dashboard/api/filter-accuracy-data?${query}`);
-            if (!chartResp.ok) {
-              console.error("Filter chart endpoint error:", chartResp.statusText);
-              return;
-            }
-            const chartData = await chartResp.json();
-            rebuildChart(chartData);
+      }
+
+      document.addEventListener('DOMContentLoaded', async () => {
+        // 1) initialize the chart
+        await initChart();
+
+        // 2) Make table rows clickable
+        const tableRows = document.querySelectorAll('.table-container table tbody tr[data-id]');
+        tableRows.forEach(row => {
+          const pid = row.getAttribute('data-id');
+          row.addEventListener('click', () => {
+            openDetailModal(pid);
           });
         });
-      </script>      
+
+        // 3) Filter form logic
+        const filterForm = document.getElementById('filterForm');
+        filterForm.addEventListener('submit', async (evt) => {
+          evt.preventDefault();
+          const reservoir = document.getElementById('reservoirSelect').value;
+          const start = document.getElementById('startDate').value;
+          const end = document.getElementById('endDate').value;
+
+          let q = "";
+          if (reservoir) q += `reservoir_id=${reservoir}&`;
+          if (start) q += `start_date=${start}&`;
+          if (end) q += `end_date=${end}&`;
+          if (q.endsWith('&')) q = q.slice(0, -1);
+
+          // 3a) Update the table
+          const tableResp = await fetch(`/dashboard/api/filter-predictions?${q}`);
+          if (!tableResp.ok) {
+            console.error("Error in filter-predictions:", tableResp.statusText);
+            return;
+          }
+          const tableData = await tableResp.json();
+          const tbody = document.querySelector('.table-container table tbody');
+          tbody.innerHTML = "";
+          tableData.forEach(rec => {
+            const row = document.createElement('tr');
+            row.setAttribute('data-id', rec.id);
+            row.innerHTML = `
+              <td>${rec.reservoir_id}</td>
+              <td>${rec.predicted_level.toFixed(2)}m</td>
+              <td>${rec.actual_level !== null ? rec.actual_level.toFixed(2) + 'm' : 'Pending'}</td>
+              <td>${rec.difference !== null ? rec.difference.toFixed(2) + 'm' : '-'}</td>
+              <td>${rec.prediction_timestamp}</td>
+              <td>${rec.validation_time}</td>
+              <td>${computeStatus(rec)}</td>
+            `;
+            // click => openDetailModal
+            row.addEventListener('click', () => openDetailModal(rec.id));
+            tbody.appendChild(row);
+          });
+
+          // 3b) Update chart
+          const chartResp = await fetch(`/dashboard/api/filter-accuracy-data?${q}`);
+          if (!chartResp.ok) {
+            console.error("Error in filter-accuracy-data:", chartResp.statusText);
+            return;
+          }
+          const chartData = await chartResp.json();
+          rebuildChart(chartData);
+        });
+      });
+    </script>
 </body>
 </html>

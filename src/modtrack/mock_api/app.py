@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from datetime import datetime
 import random
+import logging
 
 app = FastAPI()
 
@@ -10,6 +11,15 @@ RESERVOIRS = {
     "reservoir_2": {"min": 200, "max": 250, "name": "Green Valley"},
     "reservoir_3": {"min": 300, "max": 350, "name": "Mountain Peak"},
 }
+
+class NoFaviconFilter(logging.Filter):
+    def filter(self, record):
+        return not (
+            record.getMessage().find("favicon.ico") >= 0 
+            and record.getMessage().find("404") >= 0
+        )
+
+logging.getLogger("uvicorn.access").addFilter(NoFaviconFilter())
 
 @app.get("/")
 async def root():

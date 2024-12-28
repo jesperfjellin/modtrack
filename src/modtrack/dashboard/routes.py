@@ -81,6 +81,7 @@ async def home(request: Request, page: int = 1, limit: int = 20):
 
         query = f"""
             SELECT
+                p.id,
                 p.reservoir_id,
                 p.predicted_level,
                 p.prediction_timestamp,
@@ -163,6 +164,41 @@ async def get_predictions(
     except Exception as e:
         print(f"Error accessing database: {e}")
         return {"error": "Failed to load prediction data"}
+    finally:
+        cur.close()
+        conn.close()
+
+@router.get("/api/predictions/{prediction_id}")
+async def get_prediction_detail(prediction_id: str):
+    """
+    Return JSON for a single prediction, including e.g. file_name, difference over time, 
+    or anything else you'd like to show in the modal.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Example query to get a single record with extra fields
+        cur.execute("""
+            SELECT
+                p.id,
+                p.reservoir_id,
+                p.predicted_level,
+                p.file_name,
+                p.prediction_timestamp,
+                p.validation_time,
+                v.actual_level,
+                v.difference,
+                v.validated_at
+            FROM predictions p
+            LEFT JOIN validations v ON p.id = v.prediction_id
+            WHERE p.id::text = %s
+        """, [prediction_id])
+
+        record = cur.fetchone()
+        if not record:
+            return {"error": f"Prediction {prediction_id} not found"}
+
+        return record
     finally:
         cur.close()
         conn.close()
