@@ -167,6 +167,107 @@ async def get_predictions(
         cur.close()
         conn.close()
 
+@router.get("/api/filter-predictions")
+async def filter_predictions(
+    reservoir_id: str = None,
+    start_date: str = None,
+    end_date: str = None
+):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        query = """
+            SELECT
+                p.id,
+                p.reservoir_id,
+                p.predicted_level,
+                p.prediction_timestamp,
+                p.validation_time,
+                v.actual_level,
+                v.difference
+            FROM predictions p
+            LEFT JOIN validations v ON p.id = v.prediction_id
+            WHERE 1=1
+        """
+        params = []
+
+        if reservoir_id:
+            query += " AND p.reservoir_id = %s"
+            params.append(reservoir_id)
+
+        if start_date:
+            query += " AND p.prediction_timestamp >= %s"
+            params.append(start_date)
+
+        if end_date:
+            # Make it inclusive to the entire end date
+            query += " AND p.prediction_timestamp < (%s::date + INTERVAL '1 day')"
+            params.append(end_date)
+
+        query += " ORDER BY p.prediction_timestamp DESC"
+
+        cur.execute(query, params)
+        rows = cur.fetchall()
+
+        return rows  # List[dict], thanks to RealDictCursor in get_db_connection
+    except Exception as e:
+        print("Filter Error:", e)
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+@router.get("/api/filter-accuracy-data")
+async def filter_accuracy_data(
+    reservoir_id: str = None,
+    start_date: str = None,
+    end_date: str = None
+):
+    """
+    Return the same structure as /api/accuracy-data, but filtered.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        base_query = """
+            SELECT
+                p.reservoir_id,
+                v.validated_at as timestamp,
+                v.actual_level - p.predicted_level as deviation
+            FROM predictions p
+            JOIN validations v ON p.id = v.prediction_id
+            WHERE 1=1
+        """
+        params = []
+        if reservoir_id:
+            base_query += " AND p.reservoir_id = %s"
+            params.append(reservoir_id)
+        if start_date:
+            base_query += " AND p.prediction_timestamp >= %s"
+            params.append(start_date)
+        if end_date:
+            base_query += " AND p.prediction_timestamp < (%s::date + INTERVAL '1 day')"
+            params.append(end_date)
+
+        base_query += " ORDER BY v.validated_at ASC"
+
+        cur.execute(base_query, params)
+        rows = cur.fetchall()
+
+        # Group them just like in get_accuracy_data():
+        reservoirs = {}
+        for row in rows:
+            rid = row["reservoir_id"]
+            if rid not in reservoirs:
+                reservoirs[rid] = {"timestamps": [], "deviations": []}
+            reservoirs[rid]["timestamps"].append(row["timestamp"].isoformat())
+            reservoirs[rid]["deviations"].append(float(row["deviation"]))
+
+        return reservoirs
+    finally:
+        cur.close()
+        conn.close()
+
 @router.get("/api/accuracy-data")
 async def get_accuracy_data():
     """API endpoint for prediction accuracy time-series data"""

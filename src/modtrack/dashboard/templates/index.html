@@ -14,6 +14,24 @@
             <p class="timestamp">Last updated: {{ current_time.strftime('%Y-%m-%d %H:%M:%S UTC') }}</p>
         </header>
 
+        <form id="filterForm">
+            <label for="reservoirSelect">Filter by Reservoir:</label>
+            <select id="reservoirSelect" name="reservoir_id">
+              <option value="">All</option>
+              <option value="reservoir_1">Reservoir 1</option>
+              <option value="reservoir_2">Reservoir 2</option>
+              <option value="reservoir_3">Reservoir 3</option>
+            </select>
+  
+            <label for="startDate">Start Date:</label>
+            <input type="date" id="startDate" name="start_date" />
+  
+            <label for="endDate">End Date:</label>
+            <input type="date" id="endDate" name="end_date" />
+  
+            <button type="submit">Apply</button>
+          </form>
+        
         <!-- Statistics Summary -->
         <div class="stats-container">
             <div class="stat-box">
@@ -135,94 +153,151 @@
     {% endif %}
     <!-- Add this at the end of the body, before closing body tag -->
     <script>
-        document.addEventListener('DOMContentLoaded', async function() {
-            // Define colors for each reservoir
-            const reservoirColors = {
-                'reservoir_1': { border: '#3498db', background: 'rgba(52, 152, 219, 0.1)' },
-                'reservoir_2': { border: '#e74c3c', background: 'rgba(231, 76, 60, 0.1)' },
-                'reservoir_3': { border: '#2ecc71', background: 'rgba(46, 204, 113, 0.1)' }
-            };
-    
-            // Fetch the accuracy data
-            const response = await fetch('/dashboard/api/accuracy-data');
-            const reservoirs = await response.json();
-            
-            // Create datasets for each reservoir
-            const datasets = Object.entries(reservoirs).map(([reservoirId, data]) => ({
-                label: `${reservoirId} Deviation`,
-                data: data.deviations,
-                borderColor: reservoirColors[reservoirId].border,
-                backgroundColor: reservoirColors[reservoirId].background,
-                fill: true,
-                tension: 0.4
-            }));
-    
-            // Add the perfect prediction line
-            const timestamps = Object.values(reservoirs)[0]?.timestamps || [];
-            datasets.push({
-                label: 'Perfect Prediction (0)',
-                data: new Array(timestamps.length).fill(0),
-                borderColor: '#27ae60',
-                borderWidth: 1,
-                borderDash: [5, 5],
-                fill: false
-            });
-    
-            // Create the chart
-            const ctx = document.getElementById('accuracyChart').getContext('2d');
-            new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: timestamps,
-                    datasets: datasets
+        let myChart;  // Keep chart instance in a variable we can reuse
+      
+        // A helper function for the "Status" cell, replicating your Jinja logic
+        function computeStatus(record) {
+          const now = new Date();
+          const validationDate = new Date(record.validation_time);
+      
+          if (record.actual_level != null) {
+            if (record.difference < 5) return '<span class="status good">Good</span>';
+            if (record.difference < 10) return '<span class="status warning">Warning</span>';
+            return '<span class="status error">Poor</span>';
+          } else {
+            if (validationDate < now) return '<span class="status failed">Failed</span>';
+            return '<span class="status pending">Pending</span>';
+          }
+        }
+      
+        // A helper function to (re)build the chart
+        function rebuildChart(chartData) {
+          // reservoirColors can be defined globally here if you like:
+          const reservoirColors = {
+            'reservoir_1': { border: '#3498db', background: 'rgba(52, 152, 219, 0.1)' },
+            'reservoir_2': { border: '#e74c3c', background: 'rgba(231, 76, 60, 0.1)' },
+            'reservoir_3': { border: '#2ecc71', background: 'rgba(46, 204, 113, 0.1)' }
+          };
+      
+          // Convert the JSON data into labels/datasets
+          const labels = Object.values(chartData)[0]?.timestamps || [];
+          const datasets = Object.entries(chartData).map(([resId, vals]) => ({
+            label: `${resId} Deviation`,
+            data: vals.deviations,
+            borderColor: reservoirColors[resId]?.border || '#888',
+            backgroundColor: reservoirColors[resId]?.background || 'rgba(128,128,128,0.1)',
+            fill: true,
+            tension: 0.4
+          }));
+      
+          // Perfect prediction line
+          datasets.push({
+            label: 'Perfect Prediction (0)',
+            data: new Array(labels.length).fill(0),
+            borderColor: '#27ae60',
+            borderWidth: 1,
+            borderDash: [5, 5],
+            fill: false
+          });
+      
+          // If a chart already exists, destroy it before creating a new one
+          if (myChart) {
+            myChart.destroy();
+          }
+      
+          const ctx = document.getElementById('accuracyChart').getContext('2d');
+          myChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels, datasets },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: 'Prediction Accuracy by Reservoir'
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        title: {
-                            display: true,
-                            text: 'Prediction Accuracy by Reservoir'
-                        },
-                        tooltip: {
-                            mode: 'index',
-                            intersect: false,
-                        }
-                    },
-                    scales: {
-                        y: {
-                            title: {
-                                display: true,
-                                text: 'Deviation (meters)'
-                            },
-                            grid: {
-                                color: 'rgba(0, 0, 0, 0.1)'
-                            }
-                        },
-                        x: {
-                            type: 'time',  // Use time scale
-                            time: {
-                                unit: 'hour',
-                                displayFormats: {
-                                    hour: 'HH:mm'  // Show only hours and minutes
-                                }
-                            },
-                            ticks: {
-                                maxRotation: 45,  // Rotate labels for better fit
-                                maxTicksLimit: 8   // Limit number of ticks shown
-                            },
-                            title: {
-                                display: true,
-                                text: 'Time'
-                            },
-                            grid: {
-                                color: 'rgba(0, 0, 0, 0.1)'
-                            }
-                        }
-                    }
+                tooltip: {
+                  mode: 'index',
+                  intersect: false
                 }
+              },
+              scales: {
+                y: {
+                  title: { display: true, text: 'Deviation (meters)' }
+                },
+                x: {
+                  type: 'time',
+                  time: { unit: 'hour' },
+                  ticks: { maxRotation: 45, maxTicksLimit: 8 },
+                  title: { display: true, text: 'Time' }
+                }
+              }
+            }
+          });
+        }
+      
+        // An init function to load the *initial* chart data on page load
+        async function initChart() {
+          const resp = await fetch('/dashboard/api/accuracy-data');
+          const data = await resp.json();
+          rebuildChart(data);
+        }
+      
+        document.addEventListener('DOMContentLoaded', function() {
+          // 1) Build the chart at page load (all data)
+          initChart();
+      
+          // 2) Set up the filter form listener
+          const filterForm = document.getElementById('filterForm');
+          filterForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+      
+            const reservoir = document.getElementById('reservoirSelect').value;
+            const start = document.getElementById('startDate').value;
+            const end = document.getElementById('endDate').value;
+      
+            let query = "";
+            if (reservoir) query += `reservoir_id=${reservoir}&`;
+            if (start) query += `start_date=${start}&`;
+            if (end) query += `end_date=${end}&`;
+            if (query.endsWith('&')) query = query.slice(0, -1);
+      
+            // Update table
+            const response = await fetch(`/dashboard/api/filter-predictions?${query}`);
+            if (!response.ok) {
+              console.error("Filter endpoint error:", response.statusText);
+              return;
+            }
+            const tableData = await response.json();
+      
+            // Re-render table rows
+            const tbody = document.querySelector('table tbody');
+            tbody.innerHTML = "";
+            tableData.forEach((record) => {
+              const row = document.createElement('tr');
+              row.innerHTML = `
+                <td>${record.reservoir_id}</td>
+                <td>${record.predicted_level.toFixed(2)}m</td>
+                <td>${record.actual_level != null ? record.actual_level.toFixed(2)+'m' : 'Pending'}</td>
+                <td>${record.difference != null ? record.difference.toFixed(2)+'m' : '-'}</td>
+                <td>${record.prediction_timestamp}</td>
+                <td>${record.validation_time}</td>
+                <td>${computeStatus(record)}</td>
+              `;
+              tbody.appendChild(row);
             });
+      
+            // Optionally update the chart with the same filters
+            const chartResp = await fetch(`/dashboard/api/filter-accuracy-data?${query}`);
+            if (!chartResp.ok) {
+              console.error("Filter chart endpoint error:", chartResp.statusText);
+              return;
+            }
+            const chartData = await chartResp.json();
+            rebuildChart(chartData);
+          });
         });
-    </script>
+      </script>      
 </body>
 </html>
