@@ -171,9 +171,6 @@ class ModelResultsHandler(FileSystemEventHandler):
             actual_level = response["water_level"]
 
             self.logger.info(f"Received response from API: {response}")
-            # Get actual water level from API
-            response = self.api_client.get_water_level(reservoir_id)
-            actual_level = response["water_level"]
 
             # Calculate difference
             difference = abs(actual_level - predicted_level)
