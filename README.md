@@ -1,8 +1,8 @@
 # Stack
 
-Local: Docker Compose with LocalStack (mock AWS), Postgres, Redis, Celery, FastAPI, all running in containers.
+Local: Docker Compose environment with LocalStack (mock AWS), Postgres, Redis, Celery, and FastAPI, all running in containers for easy dev/testing.
 
-Production: AWS ECS (Fargate), AWS Secrets Manager, RDS, EventBridge, CloudWatch, ElastiCache (Redis), Celery, and FastAPI. 
+Production: Docker Compose environment on AWS ECS (Fargate) with Secrets Manager, RDS, ElastiCache (Redis), Celery, and FastAPI, plus EventBridge and CloudWatch for scheduling and monitoring.
 
 # Overview
 
