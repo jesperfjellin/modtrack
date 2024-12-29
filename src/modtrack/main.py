@@ -1,3 +1,6 @@
+# TODO: Improve graph interactivity
+# TODO: Prepare for production
+
 import logging
 from fastapi import FastAPI
 from .monitor import start_monitoring
